@@ -5,6 +5,7 @@ import os
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+import japanize_matplotlib
 import math
 import io
 import requests
@@ -15,9 +16,9 @@ TODOリスト
 X toggl認証
 X toggl_resを整形
 X グラフ作成
-- 前々日のデータ取得
+X 前々日のデータ取得
 - Github連携
-- 文字化け対策
+X 文字化け対策
 """
 
 def main(event, context):
@@ -35,34 +36,50 @@ def main(event, context):
     #slack_token		=	os.environ['slack_token']
 
     ##########################################################################
-    ## Getting toggl report
-    #  - Create Date param
-    d = datetime.datetime.now(tz=jp_tz) - datetime.timedelta(days=1)
-    toggl_since = d.strftime("%Y-%m-%d")
-    
+    ## Getting toggl report    
     #  - Create Authorication for Toggl report api v2
     toggl_headers={'Content-Type': 'application/json'}
     toggl_headers['Authorization'] = "Basic " + base64.b64encode('{}:{}'.format(toggl_token, 'api_token').encode('utf-8')).decode('utf-8')
 
+    #  - Create Date param
+    global toggl_today
+    global toggl_yesterday
+    global toggl_before_yesterday
+    toggl_today = (datetime.datetime.now(tz=jp_tz) - datetime.timedelta(days=0)).strftime("%Y-%m-%d")
+    toggl_yesterday = (datetime.datetime.now(tz=jp_tz) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    toggl_before_yesterday = (datetime.datetime.now(tz=jp_tz) - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+    
     #  - Create parameters
     toggl_req_params = {}
     toggl_req_params['user_agent']=toggl_user
     toggl_req_params['workspace_id']=toggl_wsid
-    toggl_req_params['since']=toggl_since
+    toggl_req_params['since']=toggl_yesterday
+    toggl_req_params['until']=toggl_yesterday
     print(generateGetUrl(toggl_baseurl,toggl_req_params))#FOrDEBUG
 
+    ## - Today's Data
     #  - Connect to toggl report api v2 Summary Report
     toggl_req = urllib.request.Request(generateGetUrl(toggl_baseurl,toggl_req_params), headers=toggl_headers)
     toggl_res = urllib.request.urlopen(toggl_req).read()
-
     #  - Parse from urllib obj to json
     toggl_res_json = json.loads(toggl_res)
 
     print(toggl_res_json)#ForDEBUG
+    print("")
+
+    ## - Yesterday's Data
+    toggl_req_params['since']=toggl_before_yesterday
+    toggl_req_params['until']=toggl_before_yesterday
+    toggl_req_y = urllib.request.Request(generateGetUrl(toggl_baseurl,toggl_req_params), headers=toggl_headers)
+    toggl_res_y = urllib.request.urlopen(toggl_req_y).read()
+    #  - Parse from urllib obj to json
+    toggl_res_y_json = json.loads(toggl_res_y)
+
+    print(toggl_res_y_json)#ForDEBUG
 
     ##########################################################################
     ## Convert to ReportStack and Graph
-    totaltime, graphurl, stacks = togglResToReportStacks(toggl_res_json)
+    totaltime, graphurl, stacks = togglResToReportStacks(toggl_res_json, toggl_res_y_json)
     
     ##########################################################################
     ## Generate Slack's rich text and request.
@@ -78,6 +95,7 @@ def main(event, context):
     slack_req = urllib.request.Request(slack_hook_url, json.dumps(slack_req_params).encode(), slack_headers)
     with urllib.request.urlopen(slack_req) as slack_res:
         print(slack_res.read())
+
     
     # =========================== END ==================================
     
@@ -96,7 +114,7 @@ def generateGetUrl(url,params):
 
     return url[0:len(url)-1]
 
-def togglResToReportStacks(res):
+def togglResToReportStacks(res, res_y):
     gyazo_token		=	os.environ['gyazo_token']
     # ReportStacks
     totaltime=0
@@ -127,6 +145,19 @@ def togglResToReportStacks(res):
         else:
             titleicon=":grey_question:"
 
+        # convert time
+        ctime=None
+        for i, y in enumerate(res_y['data']):
+            if y['title']['project'] == None:
+                y['title']['project'] = "休憩"
+            print(str(p['title']['project'])+"("+ str(p['time']) + ") ?= " + str(y['title']['project']) +"("+ str(y['time']) + ")[" + str(i) + "], ctime=" + str(ctime))
+            if p['title']['project'] == y['title']['project']:
+                # 計算
+                ctime = p['time'] - y['time']
+                print("DECIDED :: "+str(p['title']['project']) + " ?= " + str(y['title']['project'])  +"[" + str(i) + "], ctime=" + str(ctime))
+                del res_y['data'][i]
+                break
+
         # color
         if p['title']['hex_color'] == None:
             p['title']['hex_color'] = "#DDDDDD"
@@ -137,24 +168,26 @@ def togglResToReportStacks(res):
             stack.append((":ballot_box_with_check:",pp['title']['time_entry'])) 
         #if p['title']['client'] == "https://github^^^^":
         
-        # [append] Graph params
-        graph_p.append(p['time'])
-        graph_l.append(p['title']['project'])
-        graph_c.append(p['title']['hex_color'])
+        # if NotNotify tag is NOT Set,
+        if p['title']['client'] != "NotNotify":
+            # [append] Graph params
+            graph_p.append(p['time'])
+            graph_l.append(p['title']['project'])
+            graph_c.append(p['title']['hex_color'])
 
-        # [append] to resp for slack rich text
-        resp.append(
-            ReportStack(
-                title=p['title']['project'],
-                titleIcon=titleicon,
-                color=p['title']['hex_color'],
-                time=msecToHours(p['time']),
-                converttime="-",
-                client=p['title']['client'],
-                stacktitle="やったこと",
-                stacklist=stack
+            # [append] to resp for slack rich text
+            resp.append(
+                ReportStack(
+                    title=p['title']['project'],
+                    titleIcon=titleicon,
+                    color=p['title']['hex_color'],
+                    time=msecToHours(p['time']),
+                    converttime=ctime,
+                    client=p['title']['client'],
+                    stacktitle="やったこと",
+                    stacklist=stack
+                )
             )
-        )
     
     # Create Graph
     plt.pie(graph_p, labels=graph_l, colors=graph_c, counterclock=False, startangle=90,wedgeprops={'linewidth': 3, 'edgecolor':"white"})
@@ -192,7 +225,7 @@ def togglResToReportStacks(res):
     return totaltime, gyazo_img_url, resp
 
 def msecToHours(time):
-    return str(math.floor(time/(1000*60*60)))+"h "+str(math.floor(time/(1000*60)))+"min."
+    return str(math.floor(time/(1000*60*60)))+"h "+str(math.floor(time/(1000*60))%60)+"min."
 
 def generateSlackPayload(totaltime,reportstacks,graphurl):
     #  - Create Base Data.
@@ -203,10 +236,9 @@ def generateSlackPayload(totaltime,reportstacks,graphurl):
 
     # グラフを挿入
     graphsec = {"fields": []}
-    graphtitle={}
-    graphtitle['title']="Total time：" + msecToHours(totaltime)
-    graphsec['fields'].append(graphtitle)
+    graphsec['text']= "*" + toggl_yesterday + "'s report*\n*Total time：" + msecToHours(totaltime) + "*"
     graphsec['image_url'] = graphurl
+    graphsec['mrkdwn_in'] = ['text']
     r['attachments'].append(graphsec)
 
     # 各プロジェクトごとにレイアウトを作成し挿入
@@ -227,11 +259,25 @@ def generateSlackPayload(totaltime,reportstacks,graphurl):
         ## 前日比時間
         convertsec = {}
         convertsec['title'] = "前日比"
-        convertsec['value'] = ":arrow_up_small:"+stack.ConvertTime
         convertsec['short'] = True
-        ### TODO ここで比較し、上下平行でアイコン設定
-        #convertsec['value'] = ":arrow_forward: 3h23min."
-        #convertsec['value'] = ":arrow_down: 3h23min."
+        if stack.Title == "休憩":
+            if stack.ConvertTime == None:
+                convertsec['value'] = ":new:  -  "
+            elif stack.ConvertTime > 0:
+                convertsec['value'] = ":arrow_up: "+msecToHours(stack.ConvertTime)
+            elif stack.ConvertTime == 0:
+                convertsec['value'] = ":arrow_forward: "+msecToHours(stack.ConvertTime)
+            else:
+                convertsec['value'] = ":arrow_down_small: "+msecToHours(stack.ConvertTime)
+        else:
+            if stack.ConvertTime == None:
+                convertsec['value'] = ":new:  -  "
+            elif stack.ConvertTime > 0:
+                convertsec['value'] = ":arrow_up_small: "+msecToHours(stack.ConvertTime)
+            elif stack.ConvertTime == 0:
+                convertsec['value'] = ":arrow_forward: "+msecToHours(stack.ConvertTime)
+            else:
+                convertsec['value'] = ":arrow_down: "+msecToHours(stack.ConvertTime)
         bodysec['fields'].append(convertsec)
         
         ## 進捗リスト
